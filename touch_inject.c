@@ -120,13 +120,25 @@ static int find_ts(void)
     struct input_dev *f = NULL;
     int ret;
 
-    /* input_class 未 EXPORT_SYMBOL, 通过 kallsyms 运行时查找 */
+    /* input_class 未 EXPORT_SYMBOL, 通过 kprobe 获取 kallsyms_lookup_name 地址 */
     {
-        struct class *icls = (struct class *)kallsyms_lookup_name("input_class");
+        struct class *icls = NULL;
+        unsigned long (*my_kallsyms_lookup_name)(const char *name) = NULL;
+        struct kprobe kpr = { .symbol_name = "kallsyms_lookup_name" };
+
+        if (register_kprobe(&kpr) == 0) {
+            my_kallsyms_lookup_name =
+                (void *)kpr.addr + kpr.offset;
+            unregister_kprobe(&kpr);
+        }
+
+        if (my_kallsyms_lookup_name)
+            icls = (struct class *)my_kallsyms_lookup_name("input_class");
+
         if (icls)
             class_for_each_device(icls, NULL, &f, cb_match);
         else
-            pr_warn(DRV_NAME": input_class not found via kallsyms\n");
+            pr_warn(DRV_NAME": input_class not found\n");
     }
 
     ret = register_kprobe(&kr);
