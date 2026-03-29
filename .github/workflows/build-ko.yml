@@ -66,7 +66,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: a14-6.1-latest-ccache-v5
+          key: a14-6.1-latest-ccache-v6
           restore-keys: |
             a14-6.1-latest-ccache-
 
@@ -131,7 +131,6 @@ jobs:
           cp "${DEFCONFIG}.orig" "$DEFCONFIG"
 
           tools/bazel build --disk_cache=$HOME/.cache/bazel --config=fast //common:kernel_aarch64_dist || exit 1
-
           echo "=== 内核版本 ==="
           strings bazel-bin/common/kernel_aarch64/Image | grep 'Linux version' | head -1
 
@@ -144,40 +143,39 @@ jobs:
           mkdir -p /tmp/kheaders
           tar xzf $BAZEL_OUT/out-dir-kernel-headers.tar.gz -C /tmp/kheaders/
 
-          echo "=== 2. 设置 Make 基础设施 ==="
-          # 生成 .config
+          echo "=== 2. 生成 .config ==="
           cd common
           make ARCH=arm64 gki_defconfig
 
-          # 用 bazel 的 autoconf.h 覆盖（包含完整配置）
-          if [ -f /tmp/kheaders/include/generated/autoconf.h ]; then
-            mkdir -p include/generated
-            cp /tmp/kheaders/include/generated/autoconf.h include/generated/autoconf.h
-            echo "Copied autoconf.h from bazel output"
-          fi
+          # 关闭 KASAN（模块不需要，且会导致 modpost 链接失败）
+          sed -i 's/CONFIG_KASAN=y/# CONFIG_KASAN is not set/' .config
+          sed -i 's/CONFIG_KASAN_INLINE=y/# CONFIG_KASAN_INLINE is not set/' .config
+          sed -i 's/CONFIG_KASAN_STACK=y/# CONFIG_KASAN_STACK is not set/' .config
+          sed -i 's/CONFIG_KASAN_HW_TAGS=y/# CONFIG_KASAN_HW_TAGS is not set/' .config 2>/dev/null || true
+
+          # 确保 INPUT 子系统可用
+          echo "CONFIG_INPUT=y" >> .config
+          echo "CONFIG_INPUT_MISC=y" >> .config
+
+          # 应用配置变更
+          make ARCH=arm64 CC=clang HOSTCC=gcc olddefconfig
+
+          # 用 bazel 的 autoconf.h 覆盖
+          mkdir -p include/generated
+          cp /tmp/kheaders/include/generated/autoconf.h include/generated/autoconf.h
 
           # 复制 bazel 的 Module.symvers
-          if [ -f $BAZEL_OUT/kernel_aarch64_Module.symvers ]; then
-            cp $BAZEL_OUT/kernel_aarch64_Module.symvers Module.symvers
-            echo "Copied Module.symvers from bazel output"
-          fi
+          cp $BAZEL_OUT/kernel_aarch64_Module.symvers Module.symvers
 
-          # 生成 auto.conf 和其他必要文件
-          # 关键: CC=clang (匹配 bazel), HOSTCC=gcc (编译 host 工具)
-          echo "=== 3. make modules_prepare ==="
-          make ARCH=arm64 CC=clang HOSTCC=gcc HOSTCFLAGS= modules_prepare 2>&1 | tail -10
+          echo "=== 3. modules_prepare ==="
+          make ARCH=arm64 CC=clang HOSTCC=gcc HOSTCFLAGS= modules_prepare 2>&1 | tail -5
 
-          echo "=== 4. 验证构建基础设施 ==="
-          ls -la include/config/auto.conf 2>/dev/null && echo "auto.conf OK" || echo "auto.conf MISSING"
-          ls -la include/generated/autoconf.h 2>/dev/null && echo "autoconf.h OK" || echo "autoconf.h MISSING"
-          ls -la Module.symvers 2>/dev/null && echo "Module.symvers OK" || echo "Module.symvers MISSING"
-
-          echo "=== 5. 编译模块 ==="
+          echo "=== 4. 编译模块 ==="
           make ARCH=arm64 CC=clang \
             M=$GITHUB_WORKSPACE/touch_inject \
             modules 2>&1
 
-          echo "=== 6. 验证 ==="
+          echo "=== 5. 验证 ==="
           if [ -f "$GITHUB_WORKSPACE/touch_inject/touch_inject.ko" ]; then
             echo "=== 编译成功 ==="
             file $GITHUB_WORKSPACE/touch_inject/touch_inject.ko
