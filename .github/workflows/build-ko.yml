@@ -87,14 +87,12 @@ jobs:
             -b common-${FORMATTED_BRANCH} \
             --repo-rev=v2.16
 
-          # 处理 deprecated 分支
           REMOTE_BRANCH=$(git ls-remote https://android.googlesource.com/kernel/common ${FORMATTED_BRANCH} 2>/dev/null || true)
           if grep -q deprecated <<< "$REMOTE_BRANCH" 2>/dev/null; then
             sed -i "s/\"${FORMATTED_BRANCH}\"/\"deprecated\/${FORMATTED_BRANCH}\"/g" .repo/manifests/default.xml
           fi
 
           repo sync -c --force-sync --no-clone-bundle --no-tags -j$(nproc)
-
           echo "KERNEL_ROOT=$KERNEL_ROOT" >> $GITHUB_ENV
 
       - name: 克隆补丁仓库
@@ -102,35 +100,25 @@ jobs:
           cd $GITHUB_WORKSPACE
           git clone https://github.com/ShirkNeko/susfs4ksu.git -b gki-android14-6.1 2>/dev/null || \
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1 2>/dev/null || true
-
           git clone https://github.com/ShirkNeko/SukiSU_patch.git 2>/dev/null || \
           git clone https://github.com/SukiSU/SukiSU_patch.git 2>/dev/null || true
 
       - name: 应用补丁
         run: |
           cd $KERNEL_ROOT
-
           DEFCONFIG=common/arch/arm64/configs/gki_defconfig
           cp "$DEFCONFIG" "${DEFCONFIG}.orig"
-
-          # SUSFS 补丁
           if [ -d "$GITHUB_WORKSPACE/susfs4ksu" ]; then
             for p in $GITHUB_WORKSPACE/susfs4ksu/kernel_patches/50*.patch; do
               [ -f "$p" ] && (patch -p1 --forward < "$p" || true)
             done
           fi
-
-          # SukiSU 补丁
           if [ -d "$GITHUB_WORKSPACE/SukiSU_patch" ]; then
             for p in $GITHUB_WORKSPACE/SukiSU_patch/6.1/*.patch; do
               [ -f "$p" ] && (patch -p1 --forward < "$p" || true)
             done
           fi
-
-          # 去掉 -dirty
           sed -i 's/-dirty//' common/scripts/setlocalversion 2>/dev/null || true
-
-          # 去掉 protected exports
           sed -i '/protected_exports_list.*android\/abi_gki_protected_exports_aarch64/d' common/BUILD.bazel 2>/dev/null || true
           sed -i '/kmi_symbol_list_strict_mode/d' common/BUILD.bazel 2>/dev/null || true
           rm -f common/android/abi_gki_protected_exports_*
@@ -139,7 +127,6 @@ jobs:
       - name: 构建内核 (Bazel)
         run: |
           cd $KERNEL_ROOT
-
           sed -i 's/BUILD_SYSTEM_DLKM=1/BUILD_SYSTEM_DLKM=0/' common/build.config.gki.aarch64 2>/dev/null || true
           sed -i '/MODULES_ORDER=android\/gki_aarch64_modules/d' common/build.config.gki.aarch64 2>/dev/null || true
           sed -i '/KMI_SYMBOL_LIST_STRICT_MODE/d' common/build.config.gki.aarch64 2>/dev/null || true
@@ -149,8 +136,7 @@ jobs:
           diff "${DEFCONFIG}.orig" "$DEFCONFIG" | grep '^>' | sed 's/^> //; s/^[[:space:]]*//' > "$FRAG" || true
           cp "${DEFCONFIG}.orig" "$DEFCONFIG"
 
-          tools/bazel build --disk_cache=$HOME/.cache/bazel \
-            --config=fast \
+          tools/bazel build --disk_cache=$HOME/.cache/bazel --config=fast \
             //common:kernel_aarch64_dist || exit 1
 
           echo "=== 内核版本 ==="
@@ -159,82 +145,45 @@ jobs:
       - name: 编译 touch_inject.ko
         run: |
           cd $KERNEL_ROOT
+          BAZEL_OUT="$KERNEL_ROOT/bazel-bin/common/kernel_aarch64"
 
-          # 查找 bazel 生成的构建输出目录
-          # Bazel 输出在 bazel-bin/common/kernel_aarch64/ 下
-          BAZEL_OUT="bazel-bin/common/kernel_aarch64"
-          echo "=== Bazel 输出结构 ==="
-          ls -la $BAZEL_OUT/ 2>/dev/null || true
-          find $BAZEL_OUT -name "auto.conf" -o -name "autoconf.h" -o -name "Module.symvers" 2>/dev/null || true
+          echo "=== 解压内核头文件 ==="
+          mkdir -p /tmp/kheaders
+          tar xzf $BAZEL_OUT/out-dir-kernel-headers.tar.gz -C /tmp/kheaders/
+          ls /tmp/kheaders/
 
-          # 查找 bazel 的构建缓存中的 generated 目录
-          echo "=== 查找构建文件 ==="
-          find bazel-out -name "auto.conf" 2>/dev/null | head -5
-          find bazel-out -name "autoconf.h" 2>/dev/null | head -5
-          find bazel-out -name "Module.symvers" 2>/dev/null | head -5
+          echo "=== 查找 scripts/mod 目录 ==="
+          ls $BAZEL_OUT/scripts/ 2>/dev/null || true
 
-          # 尝试用 bazel 生成 Make 基础设施
-          # 先从 bazel 输出中找到 .config
-          BAZEL_CONFIG=$(find bazel-out -name ".config" 2>/dev/null | head -1)
-          echo "Found .config: $BAZEL_CONFIG"
+          echo "=== 查找 .config ==="
+          find $BAZEL_OUT -maxdepth 4 -name ".config" 2>/dev/null | head -5
 
-          # 方案1: 从 bazel 输出中复制构建文件
-          if [ -n "$BAZEL_CONFIG" ]; then
-            CONFIG_DIR=$(dirname "$BAZEL_CONFIG")
-            echo "Config dir: $CONFIG_DIR"
-            ls -la "$CONFIG_DIR/" 2>/dev/null | head -20
+          echo "=== 查找 autoconf.h ==="
+          find $BAZEL_OUT -maxdepth 6 -name "autoconf.h" 2>/dev/null | head -5
+
+          echo "=== 查找 auto.conf ==="
+          find $BAZEL_OUT -maxdepth 6 -name "auto.conf" 2>/dev/null | head -5
+
+          echo "=== 用 bazel 的 scripts 目录尝试编译 ==="
+          # 复制 bazel 的 scripts 到 common
+          if [ -d "$BAZEL_OUT/scripts" ]; then
+            cp -r $BAZEL_OUT/scripts/ common/scripts_bazel/ 2>/dev/null || true
           fi
 
-          # 方案2: 用 make defconfig + modules_prepare
-          cd common
-          echo "=== 生成 Make 基础设施 ==="
-          make ARCH=arm64 defconfig 2>&1 | tail -5
-          make ARCH=arm64 modules_prepare 2>&1 | tail -10
+          # 用 bazel 输出的 Module.symvers
+          cp $BAZEL_OUT/kernel_aarch64_Module.symvers common/Module.symvers 2>/dev/null || true
 
-          # 验证
-          if [ ! -f include/generated/autoconf.h ]; then
-            echo "ERROR: autoconf.h 未生成"
-            # 尝试从 bazel 输出中提取
-            BAZEL_AUTOCONF=$(find $GITHUB_WORKSPACE/$KERNEL_ROOT/bazel-out -name "autoconf.h" 2>/dev/null | head -1)
-            if [ -n "$BAZEL_AUTOCONF" ]; then
-              echo "从 bazel 输出中找到 autoconf.h: $BAZEL_AUTOCONF"
-              mkdir -p include/generated
-              cp "$BAZEL_AUTOCONF" include/generated/autoconf.h
-            fi
-          fi
-
-          if [ ! -f include/config/auto.conf ]; then
-            echo "ERROR: auto.conf 未生成"
-            BAZEL_AUTOCONF=$(find $GITHUB_WORKSPACE/$KERNEL_ROOT/bazel-out -name "auto.conf" 2>/dev/null | head -1)
-            if [ -n "$BAZEL_AUTOCONF" ]; then
-              echo "从 bazel 输出中找到 auto.conf: $BAZEL_AUTOCONF"
-              mkdir -p include/config
-              cp "$BAZEL_AUTOCONF" include/config/auto.conf
-            fi
-          fi
-
-          # 编译模块
-          echo "=== 编译模块 ==="
-          make ARCH=arm64 \
-            M=$GITHUB_WORKSPACE/touch_inject \
-            modules 2>&1
-
-          # 验证
-          if [ -f "$GITHUB_WORKSPACE/touch_inject/touch_inject.ko" ]; then
-            echo "=== 编译成功 ==="
-            file $GITHUB_WORKSPACE/touch_inject/touch_inject.ko
-            echo "=== vermagic ==="
-            strings $GITHUB_WORKSPACE/touch_inject/touch_inject.ko | grep vermagic
-          else
-            echo "=== 编译失败 ==="
-            exit 1
-          fi
+          # 检查解压的头文件结构
+          find /tmp/kheaders -name "autoconf.h" 2>/dev/null | head -3
+          find /tmp/kheaders -name "auto.conf" 2>/dev/null | head -3
+          find /tmp/kheaders -name "Module.symvers" 2>/dev/null | head -3
+          ls /tmp/kheaders/include/ 2>/dev/null | head -10
 
       - name: 上传 artifacts
-        if: success()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: touch_inject-ko
+          name: build-debug
           path: |
             touch_inject/touch_inject.ko
           retention-days: 30
