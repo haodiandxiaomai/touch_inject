@@ -12,11 +12,8 @@ jobs:
     timeout-minutes: 90
 
     env:
-      KERNEL_VERSION: "6.1"
-      SUB_LEVEL: "128"
       ANDROID_VERSION: "android14"
-      OS_PATCH_LEVEL: "2025-03"
-      KSU_VARIANT: "SukiSU"
+      KERNEL_VERSION: "6.1"
 
     steps:
       - name: Checkout touch_inject
@@ -42,7 +39,7 @@ jobs:
       - name: 安装依赖
         uses: awalsh128/cache-apt-pkgs-action@latest
         with:
-          packages: ccache python3 git curl build-essential libssl-dev bison flex libelf-dev dwarves
+          packages: ccache python3 git curl build-essential libssl-dev bison flex libelf-dev dwarves bc
           execute_install_scripts: true
 
       - name: 下载 repo 工具
@@ -69,7 +66,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: a14-6.1-128-ccache-v2
+          key: a14-6.1-128-ccache-v3
           restore-keys: |
             a14-6.1-128-ccache-
 
@@ -78,7 +75,7 @@ jobs:
           git config --global user.name "BuildBot"
           git config --global user.email "build@ci.local"
 
-      - name: 同步内核源码
+      - name: 同步内核源码（锁定 6.1.128）
         run: |
           FORMATTED_BRANCH="${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}"
           KERNEL_ROOT="$GITHUB_WORKSPACE/$FORMATTED_BRANCH"
@@ -100,6 +97,39 @@ jobs:
 
           echo "KERNEL_ROOT=$KERNEL_ROOT" >> $GITHUB_ENV
 
+      - name: 锁定内核版本到 v6.1.128
+        run: |
+          cd $KERNEL_ROOT/common
+          # 获取所有标签并找到 6.1.128
+          git fetch --unshallow origin || true
+          git fetch --tags origin || true
+
+          # 找到 v6.1.128 或 android-6.1.128 标签
+          TAG=$(git tag -l | grep -E '^(v)?6\.1\.128$' | head -1)
+          if [ -z "$TAG" ]; then
+            TAG=$(git tag -l | grep '6.1.128' | head -1)
+          fi
+          if [ -z "$TAG" ]; then
+            # 按版本号找最近的 commit
+            echo "没找到 6.1.128 标签，搜索可用版本..."
+            git tag -l | grep '6.1.' | sort -V | tail -20
+            echo "尝试用 Linux 6.1.128 上游标签..."
+            git fetch origin --depth=500 || true
+            TAG=$(git tag -l | grep -E '^v6\.1\.128$' | head -1)
+          fi
+
+          if [ -n "$TAG" ]; then
+            echo "检出标签: $TAG"
+            git checkout "$TAG"
+          else
+            echo "ERROR: 找不到 6.1.128 对应的标签"
+            echo "可用的标签 (最后20个):"
+            git tag -l | sort -V | tail -20
+            exit 1
+          fi
+
+          echo "当前版本: $(git describe --tags 2>/dev/null || git log --oneline -1)"
+
       - name: 克隆补丁仓库
         run: |
           cd $GITHUB_WORKSPACE
@@ -109,31 +139,26 @@ jobs:
           git clone https://github.com/ShirkNeko/SukiSU_patch.git 2>/dev/null || \
           git clone https://github.com/SukiSU/SukiSU_patch.git 2>/dev/null || true
 
-      - name: 应用 KernelSU 补丁
+      - name: 应用补丁
         run: |
           cd $KERNEL_ROOT
 
           DEFCONFIG=common/arch/arm64/configs/gki_defconfig
           cp "$DEFCONFIG" "${DEFCONFIG}.orig"
 
-          # 应用 SUSFS 补丁
+          # SUSFS 补丁
           if [ -d "$GITHUB_WORKSPACE/susfs4ksu" ]; then
             for p in $GITHUB_WORKSPACE/susfs4ksu/kernel_patches/50*.patch; do
               [ -f "$p" ] && (patch -p1 --forward < "$p" || true)
             done
           fi
 
-          # 应用 SukiSU 补丁
+          # SukiSU 补丁
           if [ -d "$GITHUB_WORKSPACE/SukiSU_patch" ]; then
             for p in $GITHUB_WORKSPACE/SukiSU_patch/6.1/*.patch; do
               [ -f "$p" ] && (patch -p1 --forward < "$p" || true)
             done
           fi
-
-          # 关闭 GKI 严格检查
-          sed -i 's/BUILD_SYSTEM_DLKM=1/BUILD_SYSTEM_DLKM=0/' common/build.config.gki.aarch64 2>/dev/null || true
-          sed -i '/MODULES_ORDER=android\/gki_aarch64_modules/d' common/build.config.gki.aarch64 2>/dev/null || true
-          sed -i '/KMI_SYMBOL_LIST_STRICT_MODE/d' common/build.config.gki.aarch64 2>/dev/null || true
 
           # 去掉 -dirty
           sed -i 's/-dirty//' common/scripts/setlocalversion 2>/dev/null || true
@@ -144,74 +169,64 @@ jobs:
           rm -f common/android/abi_gki_protected_exports_*
           sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" build/kernel/kleaf/impl/stamp.bzl 2>/dev/null || true
 
-      - name: 构建内核
+      - name: 构建内核 (Bazel)
         run: |
           cd $KERNEL_ROOT
 
-          if [ -f "build/build.sh" ]; then
-            # 使用 build.sh 构建
-            LTO_FLAG=""
-            bash build/build.sh \
-              --kmi_symbol_list_strict_mode=0 \
-              --build_system_dlkm=0 \
-              -l 2>&1 | tail -20
-          else
-            # 使用 bazel 构建
-            tools/bazel build --disk_cache=$HOME/.cache/bazel \
-              --config=fast \
-              //common:kernel_aarch64_dist 2>&1 | tail -20
+          sed -i 's/BUILD_SYSTEM_DLKM=1/BUILD_SYSTEM_DLKM=0/' common/build.config.gki.aarch64 2>/dev/null || true
+          sed -i '/MODULES_ORDER=android\/gki_aarch64_modules/d' common/build.config.gki.aarch64 2>/dev/null || true
+          sed -i '/KMI_SYMBOL_LIST_STRICT_MODE/d' common/build.config.gki.aarch64 2>/dev/null || true
+
+          # 提取 defconfig 差异到 fragment
+          DEFCONFIG=common/arch/arm64/configs/gki_defconfig
+          FRAG="common/arch/arm64/configs/ksu.fragment"
+          diff "${DEFCONFIG}.orig" "$DEFCONFIG" | grep '^>' | sed 's/^> //; s/^[[:space:]]*//' > "$FRAG" || true
+          cp "${DEFCONFIG}.orig" "$DEFCONFIG"
+
+          FRAG_FLAG=""
+          if [ -s "$FRAG" ]; then
+            FRAG_FLAG="--//common:kmi_symbol_list_strict_mode=0"
           fi
 
-          # 验证
-          if [ -f "bazel-bin/common/kernel_aarch64/Image" ]; then
-            echo "=== 内核构建成功 ==="
-            strings bazel-bin/common/kernel_aarch64/Image | grep 'Linux version' | head -3
-          elif [ -f "out/android14-6.1/dist/Image" ]; then
-            echo "=== 内核构建成功 ==="
-            strings out/android14-6.1/dist/Image | grep 'Linux version' | head -3
-          fi
+          tools/bazel build --disk_cache=$HOME/.cache/bazel \
+            --config=fast \
+            $FRAG_FLAG \
+            //common:kernel_aarch64_dist || exit 1
 
-      - name: 编译 touch_inject.ko
+          echo "=== 内核版本 ==="
+          strings bazel-bin/common/kernel_aarch64/Image | grep 'Linux version' | head -3
+
+      - name: 编译 touch_inject.ko (Make)
         run: |
-          cd $KERNEL_ROOT
+          cd $KERNEL_ROOT/common
 
-          # 确定内核构建目录
-          if [ -d "bazel-bin/common/kernel_aarch64" ]; then
-            BUILD_DIR="bazel-bin/common/kernel_aarch64"
-          elif [ -d "out/android14-6.1/dist" ]; then
-            BUILD_DIR="out/android14-6.1/dist"
-          else
-            BUILD_DIR="common"
-          fi
+          # 从 defconfig 生成 .config
+          make ARCH=arm64 gki_defconfig
 
-          echo "使用构建目录: $BUILD_DIR"
+          # 生成 Make 基础设施
+          make ARCH=arm64 modules_prepare
 
-          # 编译 .ko
-          make -C $KERNEL_ROOT/common \
+          # 编译模块
+          make ARCH=arm64 \
             M=$GITHUB_WORKSPACE/touch_inject \
-            ARCH=arm64 \
             modules
 
           # 验证
           if [ -f "$GITHUB_WORKSPACE/touch_inject/touch_inject.ko" ]; then
             echo "=== 编译成功 ==="
             file $GITHUB_WORKSPACE/touch_inject/touch_inject.ko
+            echo "=== vermagic ==="
             strings $GITHUB_WORKSPACE/touch_inject/touch_inject.ko | grep vermagic
           else
             echo "=== 编译失败 ==="
             exit 1
           fi
 
-      - name: 上传 touch_inject.ko
+      - name: 上传 artifacts
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: touch_inject-ko
-          path: touch_inject/touch_inject.ko
-          retention-days: 30
-
-      - name: 上传 test_inject
-        uses: actions/upload-artifact@v4
-        with:
-          name: test_inject
-          path: touch_inject/test_inject.c
+          path: |
+            touch_inject/touch_inject.ko
           retention-days: 30
