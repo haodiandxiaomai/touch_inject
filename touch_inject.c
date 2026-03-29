@@ -22,6 +22,7 @@
 #include <linux/ioctl.h>
 #include <linux/string.h>
 #include <linux/kprobes.h>
+#include <linux/kallsyms.h>
 #include <linux/utsname.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
@@ -119,12 +120,14 @@ static int find_ts(void)
     struct input_dev *f = NULL;
     int ret;
 
-    /* input_class: 5.15 是值, 6.1 可能是值或指针 */
-    if (sizeof(input_class) == sizeof(struct class *))
-        class_for_each_device(*(struct class **)&input_class,
-                              NULL, &f, cb_match);
-    else
-        class_for_each_device(&input_class, NULL, &f, cb_match);
+    /* input_class 未 EXPORT_SYMBOL, 通过 kallsyms 运行时查找 */
+    {
+        struct class *icls = (struct class *)kallsyms_lookup_name("input_class");
+        if (icls)
+            class_for_each_device(icls, NULL, &f, cb_match);
+        else
+            pr_warn(DRV_NAME": input_class not found via kallsyms\n");
+    }
 
     ret = register_kprobe(&kr);
     if (ret) pr_warn(DRV_NAME": kprobe err %d\n", ret);
