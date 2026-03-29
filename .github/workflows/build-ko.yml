@@ -39,7 +39,7 @@ jobs:
       - name: 安装依赖
         uses: awalsh128/cache-apt-pkgs-action@latest
         with:
-          packages: ccache python3 git curl build-essential libssl-dev bison flex libelf-dev dwarves bc
+          packages: ccache python3 git curl build-essential libssl-dev bison flex libelf-dev dwarves bc clang lld
           execute_install_scripts: true
 
       - name: 下载 repo 工具
@@ -66,7 +66,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: a14-6.1-latest-ccache-v4
+          key: a14-6.1-latest-ccache-v5
           restore-keys: |
             a14-6.1-latest-ccache-
 
@@ -81,17 +81,11 @@ jobs:
           KERNEL_ROOT="$GITHUB_WORKSPACE/$FORMATTED_BRANCH"
           mkdir -p "$KERNEL_ROOT"
           cd "$KERNEL_ROOT"
-
-          repo init --depth=1 \
-            -u https://android.googlesource.com/kernel/manifest \
-            -b common-${FORMATTED_BRANCH} \
-            --repo-rev=v2.16
-
+          repo init --depth=1 -u https://android.googlesource.com/kernel/manifest -b common-${FORMATTED_BRANCH} --repo-rev=v2.16
           REMOTE_BRANCH=$(git ls-remote https://android.googlesource.com/kernel/common ${FORMATTED_BRANCH} 2>/dev/null || true)
           if grep -q deprecated <<< "$REMOTE_BRANCH" 2>/dev/null; then
             sed -i "s/\"${FORMATTED_BRANCH}\"/\"deprecated\/${FORMATTED_BRANCH}\"/g" .repo/manifests/default.xml
           fi
-
           repo sync -c --force-sync --no-clone-bundle --no-tags -j$(nproc)
           echo "KERNEL_ROOT=$KERNEL_ROOT" >> $GITHUB_ENV
 
@@ -136,54 +130,68 @@ jobs:
           diff "${DEFCONFIG}.orig" "$DEFCONFIG" | grep '^>' | sed 's/^> //; s/^[[:space:]]*//' > "$FRAG" || true
           cp "${DEFCONFIG}.orig" "$DEFCONFIG"
 
-          tools/bazel build --disk_cache=$HOME/.cache/bazel --config=fast \
-            //common:kernel_aarch64_dist || exit 1
+          tools/bazel build --disk_cache=$HOME/.cache/bazel --config=fast //common:kernel_aarch64_dist || exit 1
 
           echo "=== 内核版本 ==="
-          strings bazel-bin/common/kernel_aarch64/Image | grep 'Linux version' | head -3
+          strings bazel-bin/common/kernel_aarch64/Image | grep 'Linux version' | head -1
 
       - name: 编译 touch_inject.ko
         run: |
           cd $KERNEL_ROOT
           BAZEL_OUT="$KERNEL_ROOT/bazel-bin/common/kernel_aarch64"
 
-          echo "=== 解压内核头文件 ==="
+          echo "=== 1. 解压内核头文件 ==="
           mkdir -p /tmp/kheaders
           tar xzf $BAZEL_OUT/out-dir-kernel-headers.tar.gz -C /tmp/kheaders/
-          ls /tmp/kheaders/
 
-          echo "=== 查找 scripts/mod 目录 ==="
-          ls $BAZEL_OUT/scripts/ 2>/dev/null || true
+          echo "=== 2. 设置 Make 基础设施 ==="
+          # 生成 .config
+          cd common
+          make ARCH=arm64 gki_defconfig
 
-          echo "=== 查找 .config ==="
-          find $BAZEL_OUT -maxdepth 4 -name ".config" 2>/dev/null | head -5
-
-          echo "=== 查找 autoconf.h ==="
-          find $BAZEL_OUT -maxdepth 6 -name "autoconf.h" 2>/dev/null | head -5
-
-          echo "=== 查找 auto.conf ==="
-          find $BAZEL_OUT -maxdepth 6 -name "auto.conf" 2>/dev/null | head -5
-
-          echo "=== 用 bazel 的 scripts 目录尝试编译 ==="
-          # 复制 bazel 的 scripts 到 common
-          if [ -d "$BAZEL_OUT/scripts" ]; then
-            cp -r $BAZEL_OUT/scripts/ common/scripts_bazel/ 2>/dev/null || true
+          # 用 bazel 的 autoconf.h 覆盖（包含完整配置）
+          if [ -f /tmp/kheaders/include/generated/autoconf.h ]; then
+            mkdir -p include/generated
+            cp /tmp/kheaders/include/generated/autoconf.h include/generated/autoconf.h
+            echo "Copied autoconf.h from bazel output"
           fi
 
-          # 用 bazel 输出的 Module.symvers
-          cp $BAZEL_OUT/kernel_aarch64_Module.symvers common/Module.symvers 2>/dev/null || true
+          # 复制 bazel 的 Module.symvers
+          if [ -f $BAZEL_OUT/kernel_aarch64_Module.symvers ]; then
+            cp $BAZEL_OUT/kernel_aarch64_Module.symvers Module.symvers
+            echo "Copied Module.symvers from bazel output"
+          fi
 
-          # 检查解压的头文件结构
-          find /tmp/kheaders -name "autoconf.h" 2>/dev/null | head -3
-          find /tmp/kheaders -name "auto.conf" 2>/dev/null | head -3
-          find /tmp/kheaders -name "Module.symvers" 2>/dev/null | head -3
-          ls /tmp/kheaders/include/ 2>/dev/null | head -10
+          # 生成 auto.conf 和其他必要文件
+          # 关键: CC=clang (匹配 bazel), HOSTCC=gcc (编译 host 工具)
+          echo "=== 3. make modules_prepare ==="
+          make ARCH=arm64 CC=clang HOSTCC=gcc HOSTCFLAGS= modules_prepare 2>&1 | tail -10
 
-      - name: 上传 artifacts
-        if: always()
+          echo "=== 4. 验证构建基础设施 ==="
+          ls -la include/config/auto.conf 2>/dev/null && echo "auto.conf OK" || echo "auto.conf MISSING"
+          ls -la include/generated/autoconf.h 2>/dev/null && echo "autoconf.h OK" || echo "autoconf.h MISSING"
+          ls -la Module.symvers 2>/dev/null && echo "Module.symvers OK" || echo "Module.symvers MISSING"
+
+          echo "=== 5. 编译模块 ==="
+          make ARCH=arm64 CC=clang \
+            M=$GITHUB_WORKSPACE/touch_inject \
+            modules 2>&1
+
+          echo "=== 6. 验证 ==="
+          if [ -f "$GITHUB_WORKSPACE/touch_inject/touch_inject.ko" ]; then
+            echo "=== 编译成功 ==="
+            file $GITHUB_WORKSPACE/touch_inject/touch_inject.ko
+            echo "=== vermagic ==="
+            strings $GITHUB_WORKSPACE/touch_inject/touch_inject.ko | grep vermagic
+          else
+            echo "=== 编译失败 ==="
+            exit 1
+          fi
+
+      - name: 上传 touch_inject.ko
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: build-debug
-          path: |
-            touch_inject/touch_inject.ko
+          name: touch_inject-ko
+          path: touch_inject/touch_inject.ko
           retention-days: 30
