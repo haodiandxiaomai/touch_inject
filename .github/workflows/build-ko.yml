@@ -159,7 +159,7 @@ jobs:
           echo "=== 去掉 clang 不支持的 flag ==="
           sed -i "s/-fconserve-stack//g" Makefile
           echo "=== 编译模块 ==="
-          make ARCH=arm64 CC=clang M=$GITHUB_WORKSPACE/touch_inject modules 2>&1
+          make ARCH=arm64 CC=clang KCFLAGS="-Wno-unknown-warning-option" M=$GITHUB_WORKSPACE/touch_inject modules 2>&1
 
           echo "=== 验证 ==="
           if [ -f "$GITHUB_WORKSPACE/touch_inject/touch_inject.ko" ]; then
