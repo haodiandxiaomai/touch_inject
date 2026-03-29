@@ -66,7 +66,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: a14-6.1-latest-ccache-v6
+          key: a14-6.1-latest-ccache-v11
           restore-keys: |
             a14-6.1-latest-ccache-
 
@@ -92,10 +92,8 @@ jobs:
       - name: 克隆补丁仓库
         run: |
           cd $GITHUB_WORKSPACE
-          git clone https://github.com/ShirkNeko/susfs4ksu.git -b gki-android14-6.1 2>/dev/null || \
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android14-6.1 2>/dev/null || true
-          git clone https://github.com/ShirkNeko/SukiSU_patch.git 2>/dev/null || \
-          git clone https://github.com/SukiSU/SukiSU_patch.git 2>/dev/null || true
+          git clone https://github.com/ShirkNeko/susfs4ksu.git -b gki-android14-6.1 2>/dev/null || true
+          git clone https://github.com/ShirkNeko/SukiSU_patch.git 2>/dev/null || true
 
       - name: 应用补丁
         run: |
@@ -124,14 +122,12 @@ jobs:
           sed -i 's/BUILD_SYSTEM_DLKM=1/BUILD_SYSTEM_DLKM=0/' common/build.config.gki.aarch64 2>/dev/null || true
           sed -i '/MODULES_ORDER=android\/gki_aarch64_modules/d' common/build.config.gki.aarch64 2>/dev/null || true
           sed -i '/KMI_SYMBOL_LIST_STRICT_MODE/d' common/build.config.gki.aarch64 2>/dev/null || true
-
           DEFCONFIG=common/arch/arm64/configs/gki_defconfig
           FRAG="common/arch/arm64/configs/ksu.fragment"
           diff "${DEFCONFIG}.orig" "$DEFCONFIG" | grep '^>' | sed 's/^> //; s/^[[:space:]]*//' > "$FRAG" || true
           cp "${DEFCONFIG}.orig" "$DEFCONFIG"
-
           tools/bazel build --disk_cache=$HOME/.cache/bazel --config=fast //common:kernel_aarch64_dist || exit 1
-          echo "=== 内核版本 ==="
+          echo "内核构建成功"
           strings bazel-bin/common/kernel_aarch64/Image | grep 'Linux version' | head -1
 
       - name: 编译 touch_inject.ko
@@ -139,49 +135,31 @@ jobs:
           cd $KERNEL_ROOT
           BAZEL_OUT="$KERNEL_ROOT/bazel-bin/common/kernel_aarch64"
 
-          echo "=== 1. 解压内核头文件 ==="
+          echo "=== 解压内核头文件 ==="
           mkdir -p /tmp/kheaders
           tar xzf $BAZEL_OUT/out-dir-kernel-headers.tar.gz -C /tmp/kheaders/
 
-          echo "=== 2. 生成 .config ==="
+          echo "=== 生成 .config ==="
           cd common
           make ARCH=arm64 gki_defconfig
-
-          # 关闭 KASAN（模块不需要，且会导致 modpost 链接失败）
           sed -i 's/CONFIG_KASAN=y/# CONFIG_KASAN is not set/' .config
           sed -i 's/CONFIG_KASAN_INLINE=y/# CONFIG_KASAN_INLINE is not set/' .config
           sed -i 's/CONFIG_KASAN_STACK=y/# CONFIG_KASAN_STACK is not set/' .config
-          sed -i 's/CONFIG_KASAN_HW_TAGS=y/# CONFIG_KASAN_HW_TAGS is not set/' .config 2>/dev/null || true
-
-          # 确保 INPUT 子系统可用
           echo "CONFIG_INPUT=y" >> .config
           echo "CONFIG_INPUT_MISC=y" >> .config
-
-          # 应用配置变更
           make ARCH=arm64 CC=clang HOSTCC=gcc olddefconfig
 
-          # 用 bazel 的 autoconf.h 覆盖
           mkdir -p include/generated
           cp /tmp/kheaders/include/generated/autoconf.h include/generated/autoconf.h
-
-          # 复制 bazel 的 Module.symvers
           cp $BAZEL_OUT/kernel_aarch64_Module.symvers Module.symvers
 
-          echo "=== 3. 生成构建基础设施 ==="
-          echo '/* SPDX-License-Identifier: GPL-2.0-only */' > common/scripts/module.lds
-          echo '/* Minimal module linker script */' >> common/scripts/module.lds
-          echo 'SECTIONS' >> common/scripts/module.lds
-          echo '{' >> common/scripts/module.lds
-          echo '  /DISCARD/ : { *(.discard) *(.discard.*) }' >> common/scripts/module.lds
-          echo '}' >> common/scripts/module.lds
-LDS
+          echo "=== 创建 module.lds ==="
+          printf "%s\n"             "/* SPDX-License-Identifier: GPL-2.0-only */"             "SECTIONS"             "{"             "  /DISCARD/ : { *(.discard) *(.discard.*) }"             "}" > scripts/module.lds
 
-          echo "=== 4. 编译模块 ==="
-          make ARCH=arm64 CC=clang \
-            M=$GITHUB_WORKSPACE/touch_inject \
-            modules 2>&1
+          echo "=== 编译模块 ==="
+          make ARCH=arm64 CC=clang M=$GITHUB_WORKSPACE/touch_inject modules 2>&1
 
-          echo "=== 5. 验证 ==="
+          echo "=== 验证 ==="
           if [ -f "$GITHUB_WORKSPACE/touch_inject/touch_inject.ko" ]; then
             echo "=== 编译成功 ==="
             file $GITHUB_WORKSPACE/touch_inject/touch_inject.ko
