@@ -1,0 +1,6 @@
+id=touch_inject
+name=Touch Inject
+version=v1.0
+versionCode=100
+author=Claw
+description=内核级触摸注入模块 - 通过 ioctl 注入触摸事件，不注册虚拟设备
