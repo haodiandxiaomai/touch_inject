@@ -168,7 +168,9 @@ jobs:
           cp $BAZEL_OUT/kernel_aarch64_Module.symvers Module.symvers
 
           echo "=== 3. modules_prepare ==="
-          make ARCH=arm64 CC=clang HOSTCC=gcc HOSTCFLAGS= modules_prepare 2>&1 | tail -5
+          # 先确保 module.lds 存在
+          make ARCH=arm64 CC=clang HOSTCC=gcc scripts/module.lds 2>/dev/null || true
+          make ARCH=arm64 CC=clang HOSTCC=gcc HOSTCFLAGS= scripts/module.lds 2>&1
 
           echo "=== 4. 编译模块 ==="
           make ARCH=arm64 CC=clang \
