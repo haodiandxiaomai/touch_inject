@@ -156,6 +156,8 @@ jobs:
           echo "=== 创建 module.lds ==="
           printf "%s\n"             "/* SPDX-License-Identifier: GPL-2.0-only */"             "SECTIONS"             "{"             "  /DISCARD/ : { *(.discard) *(.discard.*) }"             "}" > scripts/module.lds
 
+          echo "=== 去掉 clang 不支持的 flag ==="
+          sed -i "s/-fconserve-stack//g" Makefile
           echo "=== 编译模块 ==="
           make ARCH=arm64 CC=clang M=$GITHUB_WORKSPACE/touch_inject modules 2>&1
 
