@@ -168,14 +168,12 @@ jobs:
           cp $BAZEL_OUT/kernel_aarch64_Module.symvers Module.symvers
 
           echo "=== 3. 生成构建基础设施 ==="
-          # 直接创建 module.lds（避免触发 vdso_prepare）
-          cat > common/scripts/module.lds << 'LDS'
-/* SPDX-License-Identifier: GPL-2.0-only */
-/* Minimal module linker script */
-SECTIONS
-{
-  /DISCARD/ : { *(.discard) *(.discard.*) }
-}
+          echo '/* SPDX-License-Identifier: GPL-2.0-only */' > common/scripts/module.lds
+          echo '/* Minimal module linker script */' >> common/scripts/module.lds
+          echo 'SECTIONS' >> common/scripts/module.lds
+          echo '{' >> common/scripts/module.lds
+          echo '  /DISCARD/ : { *(.discard) *(.discard.*) }' >> common/scripts/module.lds
+          echo '}' >> common/scripts/module.lds
 LDS
 
           echo "=== 4. 编译模块 ==="
