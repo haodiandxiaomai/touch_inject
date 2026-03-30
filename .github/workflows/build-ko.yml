@@ -135,6 +135,7 @@ jobs:
           printf '%s\n' 'SECTIONS' '{' '  /DISCARD/ : { *(.discard) *(.discard.*) }' '}' > scripts/module.lds
           echo "=== Build touch_inject.ko ==="
           cd $GITHUB_WORKSPACE/touch_inject
+          sed -i 's/-fconserve-stack//g' $KERNEL_ROOT/common/Makefile
           make -C $KERNEL_ROOT/common M=$PWD ARCH=arm64 LLVM=1 modules
           ls -la touch_inject.ko
           file touch_inject.ko
