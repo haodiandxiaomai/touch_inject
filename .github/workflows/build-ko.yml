@@ -133,4 +133,18 @@ jobs:
           echo "=== Create module.lds ==="
           mkdir -p scripts
           printf '%s\n' 'SECTIONS' '{' '  /DISCARD/ : { *(.discard) *(.discard.*) }' '}' > scripts/module.lds
-# remove_heredoc
+          echo "=== Build touch_inject.ko ==="
+          cd $GITHUB_WORKSPACE/touch_inject
+          make -C $KERNEL_ROOT/common M=$PWD ARCH=arm64 CC=clang modules
+          ls -la touch_inject.ko
+          file touch_inject.ko
+      - name: Upload touch_inject.ko
+        uses: actions/upload-artifact@v4
+        with:
+          name: touch_inject-ko
+          path: touch_inject/touch_inject.ko
+      - name: Upload test_inject
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-inject
+          path: touch_inject/test_inject
