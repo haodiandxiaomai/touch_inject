@@ -137,6 +137,10 @@ jobs:
           cd $GITHUB_WORKSPACE/touch_inject
           sed -i 's/-fconserve-stack//g' $KERNEL_ROOT/common/Makefile
           sed -i 's/-fconserve-stack//g' $KERNEL_ROOT/common/scripts/Makefile.build 2>/dev/null || true
+          # Fix: create asm symlink for header resolution
+          cd $KERNEL_ROOT/common/arch/arm64/include
+          [ ! -e asm ] && ln -sf asm-generic asm || true
+          cd $GITHUB_WORKSPACE/touch_inject
           make -C $KERNEL_ROOT/common M=$PWD ARCH=arm64 LLVM=1 \
             KCFLAGS="-Wno-error=unknown-warning-option -Wno-unknown-warning-option" modules
           ls -la touch_inject.ko
