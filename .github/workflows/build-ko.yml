@@ -1,27 +1,21 @@
 name: Build touch_inject.ko
-
 on:
   workflow_dispatch:
-
 permissions:
   contents: write
-
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
-
+    timeout-minutes: 120
     env:
       ANDROID_VERSION: "android14"
       KERNEL_VERSION: "6.1"
-
     steps:
       - name: Checkout touch_inject
         uses: actions/checkout@v4
         with:
           path: touch_inject
-
-      - name: 清理磁盘空间
+      - name: Free disk
         uses: endersonmenezes/free-disk-space@v3
         with:
           remove_android: true
@@ -35,67 +29,56 @@ jobs:
           rm_cmd: "rmz"
           rmz_version: "3.1.1"
           testing: false
-
-      - name: 安装依赖
+      - name: Install deps
         uses: awalsh128/cache-apt-pkgs-action@latest
         with:
-          packages: ccache python3 git curl build-essential libssl-dev bison flex libelf-dev dwarves bc clang lld
+          packages: ccache python3 git curl build-essential libssl-dev bison flex libelf-dev dwarves bc clang lld aarch64-linux-gnu-binutils
           execute_install_scripts: true
-
-      - name: 下载 repo 工具
+      - name: Download repo
         run: |
           mkdir -p ~/bin
           curl -L https://storage.googleapis.com/git-repo-downloads/repo -o ~/bin/repo
           chmod +x ~/bin/repo
           echo "~/bin" >> $GITHUB_PATH
-
-      - name: 下载工具链
+      - name: Download tools
         run: |
-          AOSP_MIRROR=https://android.googlesource.com
-          BRANCH=main-kernel-build-2024
-          git clone $AOSP_MIRROR/kernel/prebuilts/build-tools -b $BRANCH --depth 1 kernel-build-tools
-          git clone $AOSP_MIRROR/platform/system/tools/mkbootimg -b $BRANCH --depth 1 mkbootimg
-
-      - name: 配置 ccache
+          git clone https://android.googlesource.com/kernel/prebuilts/build-tools -b main-kernel-build-2024 --depth 1 kernel-build-tools
+          git clone https://android.googlesource.com/platform/system/tools/mkbootimg -b main-kernel-build-2024 --depth 1 mkbootimg
+      - name: ccache
         run: |
           mkdir -p ~/.cache/bazel
           ccache --max-size=2G
           ccache --set-config=compression=true
-
-      - name: 恢复 ccache 缓存
+      - name: ccache cache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: a14-6.1-latest-ccache-v11
+          key: a14-6.1-ccache-v17
           restore-keys: |
-            a14-6.1-latest-ccache-
-
-      - name: 配置 Git
+            a14-6.1-ccache-
+      - name: Git config
         run: |
           git config --global user.name "BuildBot"
           git config --global user.email "build@ci.local"
-
-      - name: 同步内核源码
+      - name: Sync kernel
         run: |
-          FORMATTED_BRANCH="${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}"
-          KERNEL_ROOT="$GITHUB_WORKSPACE/$FORMATTED_BRANCH"
-          mkdir -p "$KERNEL_ROOT"
-          cd "$KERNEL_ROOT"
-          repo init --depth=1 -u https://android.googlesource.com/kernel/manifest -b common-${FORMATTED_BRANCH} --repo-rev=v2.16
-          REMOTE_BRANCH=$(git ls-remote https://android.googlesource.com/kernel/common ${FORMATTED_BRANCH} 2>/dev/null || true)
-          if grep -q deprecated <<< "$REMOTE_BRANCH" 2>/dev/null; then
-            sed -i "s/\"${FORMATTED_BRANCH}\"/\"deprecated\/${FORMATTED_BRANCH}\"/g" .repo/manifests/default.xml
+          FB="${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}"
+          KR="$GITHUB_WORKSPACE/$FB"
+          mkdir -p "$KR"
+          cd "$KR"
+          repo init --depth=1 -u https://android.googlesource.com/kernel/manifest -b common-$FB --repo-rev=v2.16
+          RB=$(git ls-remote https://android.googlesource.com/kernel/common $FB 2>/dev/null || true)
+          if grep -q deprecated <<< "$RB" 2>/dev/null; then
+            sed -i "s/\"$FB\"/\"deprecated\/$FB\"/g" .repo/manifests/default.xml
           fi
           repo sync -c --force-sync --no-clone-bundle --no-tags -j$(nproc)
-          echo "KERNEL_ROOT=$KERNEL_ROOT" >> $GITHUB_ENV
-
-      - name: 克隆补丁仓库
+          echo "KERNEL_ROOT=$KR" >> $GITHUB_ENV
+      - name: Clone patches
         run: |
           cd $GITHUB_WORKSPACE
           git clone https://github.com/ShirkNeko/susfs4ksu.git -b gki-android14-6.1 2>/dev/null || true
           git clone https://github.com/ShirkNeko/SukiSU_patch.git 2>/dev/null || true
-
-      - name: 应用补丁
+      - name: Apply patches
         run: |
           cd $KERNEL_ROOT
           DEFCONFIG=common/arch/arm64/configs/gki_defconfig
@@ -115,8 +98,7 @@ jobs:
           sed -i '/kmi_symbol_list_strict_mode/d' common/BUILD.bazel 2>/dev/null || true
           rm -f common/android/abi_gki_protected_exports_*
           sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" build/kernel/kleaf/impl/stamp.bzl 2>/dev/null || true
-
-      - name: 构建内核 (Bazel)
+      - name: Build kernel
         run: |
           cd $KERNEL_ROOT
           sed -i 's/BUILD_SYSTEM_DLKM=1/BUILD_SYSTEM_DLKM=0/' common/build.config.gki.aarch64 2>/dev/null || true
@@ -127,20 +109,17 @@ jobs:
           diff "${DEFCONFIG}.orig" "$DEFCONFIG" | grep '^>' | sed 's/^> //; s/^[[:space:]]*//' > "$FRAG" || true
           cp "${DEFCONFIG}.orig" "$DEFCONFIG"
           tools/bazel build --disk_cache=$HOME/.cache/bazel --config=fast //common:kernel_aarch64_dist || exit 1
-          echo "内核构建成功"
+          echo "Kernel built OK"
           strings bazel-bin/common/kernel_aarch64/Image | grep 'Linux version' | head -1
-
-      - name: 编译 touch_inject.ko
+      - name: Build touch_inject.ko
         run: |
           cd $KERNEL_ROOT
-          BAZEL_OUT="$KERNEL_ROOT/bazel-bin/common/kernel_aarch64"
-
-          echo "=== 解压内核头文件 ==="
-          mkdir -p /tmp/kheaders
-          tar xzf $BAZEL_OUT/out-dir-kernel-headers.tar.gz -C /tmp/kheaders/
-
-          echo "=== 生成 .config ==="
-          cd common
+          BO="$KERNEL_ROOT/bazel-bin/common/kernel_aarch64"
+          echo "=== Extract headers ==="
+          mkdir -p /tmp/khdr
+          tar xzf $BO/out-dir-kernel-headers.tar.gz -C /tmp/khdr/
+          echo "=== Generate .config ==="
+          cd $KERNEL_ROOT/common
           make ARCH=arm64 gki_defconfig
           sed -i 's/CONFIG_KASAN=y/# CONFIG_KASAN is not set/' .config
           sed -i 's/CONFIG_KASAN_INLINE=y/# CONFIG_KASAN_INLINE is not set/' .config
@@ -148,44 +127,10 @@ jobs:
           echo "CONFIG_INPUT=y" >> .config
           echo "CONFIG_INPUT_MISC=y" >> .config
           make ARCH=arm64 CC=clang HOSTCC=gcc olddefconfig
-
           mkdir -p include/generated
-          cp /tmp/kheaders/include/generated/autoconf.h include/generated/autoconf.h
-          cp $BAZEL_OUT/kernel_aarch64_Module.symvers Module.symvers
-
-          echo "=== 创建 module.lds ==="
-          printf "%s\n"             "/* SPDX-License-Identifier: GPL-2.0-only */"             "SECTIONS"             "{"             "  /DISCARD/ : { *(.discard) *(.discard.*) }"             "}" > scripts/module.lds
-
-          echo "=== 去掉 clang 不支持的 flag ==="
-          sed -i "s/-fconserve-stack//g" Makefile
-          # 确保 asm 符号链接正确
-          rm -f include/asm
-          ln -sf ../arch/arm64/include/asm include/asm
-          # 确保 include/generated/uapi 存在
-          mkdir -p include/generated/uapi
-          ln -sf ../../../arch/arm64/include/generated/uapi/asm include/generated/uapi/asm 2>/dev/null || true
-          # 创建 scripts/module.lds
-          printf "%s\n"             "/* SPDX-License-Identifier: GPL-2.0-only */"             "SECTIONS"             "{"             "  /DISCARD/ : { *(.discard) *(.discard.*) }"             "}" > scripts/module.lds
-          # 直接编译 .ko（不依赖 modules_prepare）
-          echo "=== 编译模块 ==="
-          OBJTOOL=$(find $KERNEL_ROOT/bazel-bin -name "objtool" -type f 2>/dev/null | head -1)
-          make -C $GITHUB_WORKSPACE/${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}/common             ARCH=arm64             CC=clang             HOSTCC=gcc             KCFLAGS="-Wno-unknown-warning-option"             M=$GITHUB_WORKSPACE/touch_inject             modules 2>&1
-
-          echo "=== 验证 ==="
-          if [ -f "$GITHUB_WORKSPACE/touch_inject/touch_inject.ko" ]; then
-            echo "=== 编译成功 ==="
-            file $GITHUB_WORKSPACE/touch_inject/touch_inject.ko
-            echo "=== vermagic ==="
-            strings $GITHUB_WORKSPACE/touch_inject/touch_inject.ko | grep vermagic
-          else
-            echo "=== 编译失败 ==="
-            exit 1
-          fi
-
-      - name: 上传 touch_inject.ko
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: touch_inject-ko
-          path: touch_inject/touch_inject.ko
-          retention-days: 30
+          cp /tmp/khdr/include/generated/autoconf.h include/generated/autoconf.h
+          cp $BO/kernel_aarch64_Module.symvers Module.symvers
+          echo "=== Create module.lds ==="
+          mkdir -p scripts
+          printf '%s\n' 'SECTIONS' '{' '  /DISCARD/ : { *(.discard) *(.discard.*) }' '}' > scripts/module.lds
+# remove_heredoc
