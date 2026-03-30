@@ -32,7 +32,7 @@ jobs:
       - name: Install deps
         uses: awalsh128/cache-apt-pkgs-action@latest
         with:
-          packages: ccache python3 git curl build-essential libssl-dev bison flex libelf-dev dwarves bc clang lld binutils-aarch64-linux-gnu gcc-aarch64-linux-gnu
+          packages: ccache python3 git curl build-essential libssl-dev bison flex libelf-dev dwarves bc clang lld binutils-aarch64-linux-gnu
           execute_install_scripts: true
       - name: Download repo
         run: |
@@ -135,7 +135,7 @@ jobs:
           printf '%s\n' 'SECTIONS' '{' '  /DISCARD/ : { *(.discard) *(.discard.*) }' '}' > scripts/module.lds
           echo "=== Build touch_inject.ko ==="
           cd $GITHUB_WORKSPACE/touch_inject
-          make -C $KERNEL_ROOT/common M=$PWD ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules
+          make -C $KERNEL_ROOT/common M=$PWD ARCH=arm64 LLVM=1 modules
           ls -la touch_inject.ko
           file touch_inject.ko
       - name: Upload touch_inject.ko
