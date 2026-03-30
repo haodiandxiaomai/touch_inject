@@ -135,14 +135,15 @@ jobs:
           printf '%s\n' 'SECTIONS' '{' '  /DISCARD/ : { *(.discard) *(.discard.*) }' '}' > scripts/module.lds
           echo "=== Build touch_inject.ko ==="
           cd $GITHUB_WORKSPACE/touch_inject
-          sed -i 's/-fconserve-stack//g' $KERNEL_ROOT/common/Makefile
-          sed -i 's/-fconserve-stack//g' $KERNEL_ROOT/common/scripts/Makefile.build 2>/dev/null || true
-          # Fix: create asm symlink for UAPI header resolution
-          cd $KERNEL_ROOT/common/include/uapi
-          [ ! -e asm ] && ln -sf ../asm-generic asm || true
-          cd $GITHUB_WORKSPACE/touch_inject
-          make -C $KERNEL_ROOT/common M=$PWD ARCH=arm64 LLVM=1 \
-            KCFLAGS="-Wno-error=unknown-warning-option -Wno-unknown-warning-option" modules
+          # Fix: use extracted headers + Module.symvers from bazel output
+          sed -i 's/-fconserve-stack//g' $KERNEL_ROOT/common/Makefile 2>/dev/null || true
+          KDIR=$KERNEL_ROOT/common
+          # Use bazel output as source, extracted headers for UAPI
+          cp /tmp/khdr/include/generated/autoconf.h $KDIR/include/generated/autoconf.h
+          cp $BO/kernel_aarch64_Module.symvers $KDIR/Module.symvers
+          # Add -I for extracted headers (fixes asm/types.h resolution)
+          make -C $KDIR M=$PWD ARCH=arm64 LLVM=1 \
+            KCFLAGS="-I/tmp/khdr/include -I/tmp/khdr/include/uapi -Wno-error=unknown-warning-option -Wno-unknown-warning-option" modules
           ls -la touch_inject.ko
           file touch_inject.ko
       - name: Upload touch_inject.ko
